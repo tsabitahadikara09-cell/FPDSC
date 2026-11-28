@@ -1,196 +1,856 @@
+
 import streamlit as st
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
+import cv2
+import os
+import time
 from pathlib import Path
 from PIL import Image
 
-from modules.dataset import load_dataset_index, class_summary, sample_image
-from modules.preprocessing import preprocess_image, METHOD_DESCRIPTIONS
-from modules.training import train_model, MODEL_PATH
-from modules.evaluation import evaluate_model
+# =========================================================
+# CONFIGURATION
+# =========================================================
+st.set_page_config(
+    page_title="DermaCNN",
+    page_icon="🧬",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-st.set_page_config(page_title="DermaCNN | ISIC 2018", page_icon="🧬", layout="wide")
+ROOT_DIR = Path(__file__).resolve().parent
+DATASET_DIR = ROOT_DIR / "dataset"
 
-st.markdown("""<style>
-.stApp{background:#111019;color:#f3efff}.block-container{padding-top:1.25rem;padding-bottom:2rem}
-[data-testid='stSidebar']{background:#191521}.metric-card{background:#211d2b;border:1px solid #393243;padding:18px;border-radius:14px}
-div.stButton>button{border-radius:10px}h1,h2,h3{color:#f4efff}
-</style>""", unsafe_allow_html=True)
+CLASSES = ["MEL", "NV", "BKL"]
 
+CLASS_INFO = {
+    "MEL": "Melanoma",
+    "NV": "Melanocytic Nevi",
+    "BKL": "Benign Keratosis-like Lesions"
+}
 
-@st.cache_data(show_spinner=False)
-def get_data():
-    return load_dataset_index()
+CLASS_COLORS = {
+    "MEL": "#E74C3C",
+    "NV": "#3498DB",
+    "BKL": "#2ECC71"
+}
 
-df, dataset_error = get_data()
-counts = class_summary(df) if not df.empty else {"MEL":0,"NV":0,"BKL":0}
+# =========================================================
+# STYLE
+# =========================================================
+st.markdown("""
+<style>
+.stApp {
+    background-color: #0e0e17;
+    color: #f5f5f5;
+}
 
+[data-testid="stSidebar"] {
+    background-color: #191522;
+}
 
-def show_image(image, caption=None):
-    if image is not None:
-        st.image(image, caption=caption, use_container_width=True)
+h1, h2, h3 {
+    color: #f5f5f5 !important;
+}
 
+div[data-testid="stMetric"] {
+    background-color: #1c1c28;
+    padding: 18px;
+    border-radius: 12px;
+    border: 1px solid #343442;
+}
 
-def sidebar():
-    st.sidebar.markdown("# 🧬 DermaCNN")
-    st.sidebar.caption("Skin Lesion Classification | ISIC 2018")
-    pages = ["Home", "Dataset", "Filtering", "Segmentation & Masking", "Enhancement", "Hair Removal", "Grayscale", "Training (CNN)", "Evaluation"]
-    page = st.sidebar.radio("Navigasi", pages)
-    st.sidebar.divider()
-    st.sidebar.markdown("### Dataset Status")
-    if dataset_error:
-        st.sidebar.warning("Dataset belum terbaca")
-        st.sidebar.caption(dataset_error)
-    else:
-        st.sidebar.success(f"Dataset terbaca: {len(df):,} gambar")
-        st.sidebar.caption(f"Kelas terdeteksi: {df.label.nunique()} / 3")
-    if st.sidebar.button("🔄 Refresh Dataset", use_container_width=True):
-        get_data.clear(); st.rerun()
-    st.sidebar.divider()
-    st.sidebar.caption("DermaCNN | Biomedical Deep Learning Project")
-    st.sidebar.caption("ISIC 2018 • MEL • NV • BKL")
-    return page
+div[data-testid="stAlert"] {
+    border-radius: 10px;
+}
 
+</style>
+""", unsafe_allow_html=True)
 
-page = sidebar()
+# =========================================================
+# DATASET LOADER
+# =========================================================
+@st.cache_data
+def load_dataset():
 
+    rows = []
 
-def page_home():
-    st.title("🧬 DermaCNN")
-    st.subheader("Skin Lesion Classification Dashboard")
-    st.write("Demo pengolahan citra lesi kulit dan klasifikasi tiga kelas menggunakan CNN.")
-    if dataset_error:
-        st.error(dataset_error); return
-    a,b,c,d = st.columns(4)
-    a.metric("Total Images", len(df)); b.metric("Total Classes", df.label.nunique())
-    c.metric("MEL", counts.get("MEL",0)); d.metric("NV", counts.get("NV",0))
-    st.markdown("### Distribusi Kelas")
-    fig, ax = plt.subplots(figsize=(8,3.8)); ax.bar(counts.keys(), counts.values()); ax.set_ylabel("Jumlah gambar"); ax.set_title("Dataset Mini — MEL, NV, BKL")
-    st.pyplot(fig); plt.close(fig)
-    st.markdown("### Sampel Citra")
-    cols=st.columns(3)
-    for col,label in zip(cols,["MEL","NV","BKL"]):
-        img,imgid=sample_image(df,label)
-        with col: st.markdown(f"**{label}**"); show_image(img,imgid)
-    st.info("Dataset saat ini adalah dataset mini untuk demonstrasi alur aplikasi, bukan dataset yang memadai untuk validasi klinis atau penelitian performa model.")
+    if not DATASET_DIR.exists():
+        return pd.DataFrame(
+            columns=["image_id", "label", "path"]
+        )
 
+    for file in DATASET_DIR.iterdir():
 
-def page_dataset():
-    st.title("📁 Dataset Explorer")
-    st.caption("Dataset mini ISIC — MEL, NV, BKL")
-    if dataset_error:
-        st.error(dataset_error); return
-    a,b,c=st.columns(3); a.metric("Total gambar",len(df)); b.metric("Jumlah kelas",df.label.nunique()); c.metric("Kelas", "MEL • NV • BKL")
-    st.subheader("Distribusi Dataset")
-    chart=pd.DataFrame({"Kelas":list(counts.keys()),"Jumlah":list(counts.values())})
-    st.bar_chart(chart.set_index("Kelas"))
-    st.subheader("Contoh gambar per kelas")
-    cols=st.columns(3)
-    for col,label in zip(cols,["MEL","NV","BKL"]):
-        img,imgid=sample_image(df,label)
-        with col: st.markdown(f"**{label}**"); show_image(img,imgid)
-    with st.expander("Indeks Dataset"):
-        st.dataframe(df, use_container_width=True)
+        if not file.is_file():
+            continue
 
+        if file.suffix.lower() not in [
+            ".jpg", ".jpeg", ".png", ".bmp"
+        ]:
+            continue
 
-def page_preprocess(method):
-    st.title(method)
-    st.write(METHOD_DESCRIPTIONS.get(method,"Pemrosesan citra."))
-    if dataset_error:
-        st.error(dataset_error); return
-    label=st.selectbox("Pilih kelas",["MEL","NV","BKL"],key=f"label_{method}")
-    subset=df[df.label==label].reset_index(drop=True)
-    if subset.empty: st.warning("Tidak ada gambar pada kelas ini."); return
-    idx=st.slider("Pilih gambar",0,len(subset)-1,0,key=f"idx_{method}")
-    row=subset.iloc[idx]
-    original=Image.open(row.path).convert("RGB")
-    kwargs={}
-    if method=="Filtering":
-        ftype=st.selectbox("Jenis filter",["Median","Gaussian"])
-        kernel=st.slider("Kernel size",3,15,5,step=2)
-        kwargs.update(filter_type=ftype,kernel=kernel)
-    elif method=="Enhancement":
-        kwargs["clip_limit"]=st.slider("Contrast limit",1.0,5.0,2.0,0.5)
-    result=preprocess_image(original,method,**kwargs)
-    st.caption(f"Image ID: {row.image_id} • Class: {row.label}")
-    if method=="Segmentation & Masking":
-        # Show only the manually selected lesion region and its generated mask.
-        st.markdown("#### Area lesi yang dipilih")
-        st.caption("Gambar asli dengan area ROI yang dapat dipilih, lalu hasil segmentasi dan mask.")
-        roi=st.checkbox("Aktifkan area ROI manual",value=True)
-        if roi:
-            st.warning("Untuk versi ini, ROI manual berupa pemilihan area persegi belum diaktifkan. Hasil yang ditampilkan adalah segmentasi otomatis.")
-        processed,mask=result
-        cols=st.columns(2)
-        with cols[0]: show_image(processed,"Segmentasi area lesi")
-        with cols[1]: show_image(mask,"Mask")
-    elif isinstance(result,tuple):
-        processed,mask=result
-        cols=st.columns(2)
-        with cols[0]: show_image(processed,"Processed")
-        with cols[1]: show_image(mask,"Mask")
-    else:
-        cols=st.columns(2)
-        with cols[0]: show_image(original,"Original")
-        with cols[1]: show_image(result,method)
+        filename = file.stem.upper()
 
+        # Label diambil dari prefix nama file
+        label = filename.split("_")[0]
 
-def page_training():
-    st.title("🧠 Training CNN")
-    st.write("Training demonstrasi CNN dengan dataset mini tiga kelas.")
-    if dataset_error: st.error(dataset_error); return
-    st.warning("⚠️ Dataset hanya 1 gambar per kelas. Augmentasi akan membuat variasi training, tetapi tidak menggantikan data independen. Hasil training/evaluasi tidak dapat dianggap sebagai performa generalisasi model.")
-    with st.form("training_config"):
-        epochs=st.slider("Epoch",1,30,5)
-        batch_size=st.selectbox("Batch size",[2,4,8],index=1)
-        image_size=st.selectbox("Image size",[96,128,160],index=1)
-        start=st.form_submit_button("🚀 Mulai Training",type="primary")
-    if start:
-        progress=st.progress(0); status=st.empty()
+        if label not in CLASSES:
+            continue
+
         try:
-            model,history,X_demo,y_demo,names=train_model(df,epochs,batch_size,image_size,progress_callback=progress)
-            st.session_state["last_model"]=model
-            st.session_state["demo_data"]=(X_demo,y_demo)
-            st.session_state["class_names"]=names
-            st.session_state["training_history"]=history
-            progress.progress(100); status.success("Training demonstrasi selesai.")
-            hist=history.history
-            if "accuracy" in hist:
-                st.subheader("Training Accuracy"); st.line_chart(pd.DataFrame({"accuracy":hist["accuracy"]}))
-            if "loss" in hist:
-                st.subheader("Training Loss"); st.line_chart(pd.DataFrame({"loss":hist["loss"]}))
-            st.info("Training selesai pada data augmentasi dari sampel yang sama. Angka ini bukan validasi independen.")
-        except Exception as e:
-            st.error(f"Training gagal: {e}")
+            with Image.open(file) as img:
+                img.verify()
+
+            rows.append({
+                "image_id": file.stem,
+                "label": label,
+                "path": str(file)
+            })
+
+        except Exception:
+            continue
+
+    df = pd.DataFrame(
+        rows,
+        columns=["image_id", "label", "path"]
+    )
+
+    return df
 
 
-def page_evaluation():
-    st.title("📊 Evaluation")
-    if "last_model" not in st.session_state or "demo_data" not in st.session_state:
-        st.info("Jalankan Training demonstrasi terlebih dahulu."); return
-    st.warning("Evaluasi ini menggunakan sampel/variasi data yang sangat terbatas. Jangan gunakan metrik ini sebagai klaim performa penelitian atau diagnosis.")
+# =========================================================
+# DATASET UTILITIES
+# =========================================================
+def get_class_summary(df):
+
+    if df.empty:
+        return pd.Series(
+            {class_name: 0 for class_name in CLASSES}
+        )
+
+    return df["label"].value_counts().reindex(
+        CLASSES,
+        fill_value=0
+    )
+
+
+def get_sample_image(df, label):
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+        return None
+
+    row = subset.iloc[0]
+
     try:
-        model=st.session_state["last_model"]
-        X,y=st.session_state["demo_data"]
-        names=st.session_state.get("class_names",["MEL","NV","BKL"])
-        result=evaluate_model(model,X,y,names)
-        st.metric("Demo Accuracy",f"{result['accuracy']*100:.2f}%")
-        report=pd.DataFrame(result["report"]).T
-        st.subheader("Classification Report"); st.dataframe(report,use_container_width=True)
-        st.subheader("Confusion Matrix")
-        cm=result["confusion_matrix"]
-        fig,ax=plt.subplots(figsize=(5,4)); ax.imshow(cm)
-        ax.set_xticks(range(len(names)),names); ax.set_yticks(range(len(names)),names)
-        ax.set_xlabel("Predicted"); ax.set_ylabel("Actual")
-        for i in range(len(names)):
-            for j in range(len(names)): ax.text(j,i,cm[i,j],ha="center",va="center")
-        st.pyplot(fig); plt.close(fig)
-        st.download_button("Download report CSV",report.to_csv().encode("utf-8"),"demo_classification_report.csv","text/csv")
-    except Exception as e: st.error(f"Evaluasi gagal: {e}")
+        return Image.open(row["path"]).convert("RGB")
+    except Exception:
+        return None
 
 
-if page=="Home": page_home()
-elif page=="Dataset": page_dataset()
-elif page in METHOD_DESCRIPTIONS: page_preprocess(page)
-elif page=="Training (CNN)": page_training()
-elif page=="Evaluation": page_evaluation()
+def read_image(path):
+
+    try:
+        image = Image.open(path).convert("RGB")
+        return np.array(image)
+    except Exception:
+        return None
+
+
+def get_random_image(df, label):
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+        return None
+
+    row = subset.sample(1).iloc[0]
+
+    return row
+
+
+# =========================================================
+# INITIAL DATA
+# =========================================================
+df = load_dataset()
+
+summary = get_class_summary(df)
+
+total_images = len(df)
+detected_classes = sum(summary > 0)
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+with st.sidebar:
+
+    st.markdown("## 🧬 DermaCNN")
+
+    st.caption("Skin Lesion Classification | ISIC 2018")
+
+    st.markdown("---")
+
+    page = st.radio(
+        "Navigasi",
+        [
+            "Home",
+            "Dataset",
+            "Filtering",
+            "Segmentation & Masking",
+            "Enhancement",
+            "Hair Removal",
+            "Grayscale",
+            "Training (CNN)",
+            "Evaluation"
+        ]
+    )
+
+    st.markdown("---")
+
+    st.markdown("### Dataset Status")
+
+    if total_images > 0:
+
+        st.success(f"Dataset terbaca: {total_images} gambar")
+
+    else:
+
+        st.error("Dataset belum ditemukan")
+
+    st.caption(
+        f"Kelas terdeteksi: {detected_classes} / {len(CLASSES)}"
+    )
+
+    if st.button("🔄 Refresh Dataset", use_container_width=True):
+
+        st.cache_data.clear()
+        st.rerun()
+
+    st.markdown("---")
+
+    st.caption("DermaCNN | Biomedical Deep Learning Project")
+    st.caption("ISIC 2018 • MEL • NV • BKL")
+
+
+# =========================================================
+# HOME
+# =========================================================
+if page == "Home":
+
+    st.title("🧬 DermaCNN")
+
+    st.markdown(
+        """
+        ### Skin Lesion Classification
+
+        Aplikasi untuk eksplorasi dataset dan preprocessing citra
+        lesi kulit menggunakan pendekatan computer vision dan
+        deep learning.
+        """
+    )
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total Gambar", total_images)
+
+    col2.metric("Jumlah Kelas", detected_classes)
+
+    col3.metric("Kelas", "MEL • NV • BKL")
+
+    st.markdown("---")
+
+    st.subheader("Distribusi Dataset")
+
+    if total_images > 0:
+
+        st.bar_chart(summary)
+
+    else:
+
+        st.warning(
+            "Belum terdapat gambar yang berhasil dibaca dari folder dataset."
+        )
+
+    st.subheader("Contoh Gambar per Kelas")
+
+    columns = st.columns(3)
+
+    for i, label in enumerate(CLASSES):
+
+        with columns[i]:
+
+            st.markdown(f"### {label}")
+
+            st.caption(CLASS_INFO[label])
+
+            image = get_sample_image(df, label)
+
+            if image is not None:
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            else:
+
+                st.info(f"Belum ada gambar kelas {label}")
+
+
+# =========================================================
+# DATASET EXPLORER
+# =========================================================
+elif page == "Dataset":
+
+    st.title("📁 Dataset Explorer")
+
+    st.caption("Dataset ISIC • MEL, NV, BKL")
+
+    col1, col2, col3 = st.columns(3)
+
+    col1.metric("Total Gambar", total_images)
+
+    col2.metric("Jumlah Kelas", detected_classes)
+
+    col3.metric(
+        "Kelas",
+        "MEL • NV • BKL"
+    )
+
+    st.markdown("---")
+
+    st.subheader("Distribusi Dataset")
+
+    if total_images > 0:
+
+        chart_df = summary.rename("Jumlah Gambar")
+
+        st.bar_chart(chart_df)
+
+        st.dataframe(
+            pd.DataFrame({
+                "Kelas": CLASSES,
+                "Nama Penyakit": [
+                    CLASS_INFO[c] for c in CLASSES
+                ],
+                "Jumlah Gambar": [
+                    int(summary[c]) for c in CLASSES
+                ]
+            }),
+            use_container_width=True,
+            hide_index=True
+        )
+
+    else:
+
+        st.warning(
+            "Dataset kosong. Pastikan gambar berada langsung di folder dataset/"
+        )
+
+    st.markdown("---")
+
+    st.subheader("Contoh Gambar per Kelas")
+
+    cols = st.columns(3)
+
+    for i, label in enumerate(CLASSES):
+
+        with cols[i]:
+
+            st.markdown(f"### {label}")
+
+            image = get_sample_image(df, label)
+
+            if image is not None:
+
+                st.image(
+                    image,
+                    caption=CLASS_INFO[label],
+                    use_container_width=True
+                )
+
+            else:
+
+                st.info(f"Gambar kelas {label} belum tersedia")
+
+    st.markdown("---")
+
+    st.subheader("Indeks Dataset")
+
+    if total_images > 0:
+
+        display_df = df[["image_id", "label"]].copy()
+
+        display_df["Nama Kelas"] = display_df["label"].map(
+            CLASS_INFO
+        )
+
+        st.dataframe(
+            display_df,
+            use_container_width=True,
+            hide_index=True
+        )
+
+
+# =========================================================
+# FILTERING
+# =========================================================
+elif page == "Filtering":
+
+    st.title("🧹 Filtering")
+
+    st.write(
+        "Mengurangi noise pada citra lesi kulit menggunakan Gaussian Blur."
+    )
+
+    label = st.selectbox(
+        "Pilih kelas",
+        CLASSES
+    )
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+
+    else:
+
+        selected = st.selectbox(
+            "Pilih gambar",
+            subset["image_id"].tolist()
+        )
+
+        row = subset[
+            subset["image_id"] == selected
+        ].iloc[0]
+
+        image = read_image(row["path"])
+
+        if image is not None:
+
+            filtered = cv2.GaussianBlur(
+                image,
+                (5, 5),
+                0
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.subheader("Original")
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            with col2:
+
+                st.subheader("Filtered")
+
+                st.image(
+                    filtered,
+                    use_container_width=True
+                )
+
+
+# =========================================================
+# SEGMENTATION & MASKING
+# =========================================================
+elif page == "Segmentation & Masking":
+
+    st.title("🔬 Segmentation & Masking")
+
+    st.write(
+        "Membuat mask lesi dengan threshold adaptif dan operasi morfologi."
+    )
+
+    label = st.selectbox(
+        "Pilih kelas",
+        CLASSES
+    )
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+
+    else:
+
+        selected = st.selectbox(
+            "Pilih gambar",
+            subset["image_id"].tolist()
+        )
+
+        row = subset[
+            subset["image_id"] == selected
+        ].iloc[0]
+
+        image = read_image(row["path"])
+
+        if image is not None:
+
+            gray = cv2.cvtColor(
+                image,
+                cv2.COLOR_RGB2GRAY
+            )
+
+            blur = cv2.GaussianBlur(
+                gray,
+                (5, 5),
+                0
+            )
+
+            mask = cv2.adaptiveThreshold(
+                blur,
+                255,
+                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV,
+                51,
+                5
+            )
+
+            kernel = np.ones(
+                (5, 5),
+                np.uint8
+            )
+
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                kernel
+            )
+
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                kernel
+            )
+
+            segmented = cv2.bitwise_and(
+                image,
+                image,
+                mask=mask
+            )
+
+            col1, col2, col3 = st.columns(3)
+
+            with col1:
+
+                st.subheader("Original")
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            with col2:
+
+                st.subheader("Mask")
+
+                st.image(
+                    mask,
+                    clamp=True,
+                )
+
+            with col3:
+
+                st.subheader("Segmented")
+
+                st.image(
+                    segmented,
+                    use_container_width=True
+                )
+
+
+# =========================================================
+# ENHANCEMENT
+# =========================================================
+elif page == "Enhancement":
+
+    st.title("✨ Image Enhancement")
+
+    st.write(
+        "Meningkatkan kontras citra menggunakan CLAHE."
+    )
+
+    label = st.selectbox(
+        "Pilih kelas",
+        CLASSES
+    )
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+
+    else:
+
+        selected = st.selectbox(
+            "Pilih gambar",
+            subset["image_id"].tolist()
+        )
+
+        row = subset[
+            subset["image_id"] == selected
+        ].iloc[0]
+
+        image = read_image(row["path"])
+
+        if image is not None:
+
+            lab = cv2.cvtColor(
+                image,
+                cv2.COLOR_RGB2LAB
+            )
+
+            l, a, b = cv2.split(lab)
+
+            clahe = cv2.createCLAHE(
+                clipLimit=2.0,
+                tileGridSize=(8, 8)
+            )
+
+            enhanced_l = clahe.apply(l)
+
+            enhanced_lab = cv2.merge(
+                (enhanced_l, a, b)
+            )
+
+            enhanced = cv2.cvtColor(
+                enhanced_lab,
+                cv2.COLOR_LAB2RGB
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.subheader("Original")
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            with col2:
+
+                st.subheader("Enhanced")
+
+                st.image(
+                    enhanced,
+                    use_container_width=True
+                )
+
+
+# =========================================================
+# HAIR REMOVAL
+# =========================================================
+elif page == "Hair Removal":
+
+    st.title("🪒 Hair Removal")
+
+    st.write(
+        "Menghilangkan rambut pada citra menggunakan Black-Hat "
+        "morphology dan inpainting."
+    )
+
+    label = st.selectbox(
+        "Pilih kelas",
+        CLASSES
+    )
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+
+    else:
+
+        selected = st.selectbox(
+            "Pilih gambar",
+            subset["image_id"].tolist()
+        )
+
+        row = subset[
+            subset["image_id"] == selected
+        ].iloc[0]
+
+        image = read_image(row["path"])
+
+        if image is not None:
+
+            gray = cv2.cvtColor(
+                image,
+                cv2.COLOR_RGB2GRAY
+            )
+
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_RECT,
+                (17, 17)
+            )
+
+            blackhat = cv2.morphologyEx(
+                gray,
+                cv2.MORPH_BLACKHAT,
+                kernel
+            )
+
+            _, hair_mask = cv2.threshold(
+                blackhat,
+                10,
+                255,
+                cv2.THRESH_BINARY
+            )
+
+            cleaned = cv2.inpaint(
+                image,
+                hair_mask,
+                3,
+                cv2.INPAINT_TELEA
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.subheader("Original")
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            with col2:
+
+                st.subheader("Hair Removed")
+
+                st.image(
+                    cleaned,
+                    use_container_width=True
+                )
+
+
+# =========================================================
+# GRAYSCALE
+# =========================================================
+elif page == "Grayscale":
+
+    st.title("⚫ Grayscale")
+
+    st.write(
+        "Mengubah citra RGB menjadi grayscale."
+    )
+
+    label = st.selectbox(
+        "Pilih kelas",
+        CLASSES
+    )
+
+    subset = df[df["label"] == label]
+
+    if subset.empty:
+
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+
+    else:
+
+        selected = st.selectbox(
+            "Pilih gambar",
+            subset["image_id"].tolist()
+        )
+
+        row = subset[
+            subset["image_id"] == selected
+        ].iloc[0]
+
+        image = read_image(row["path"])
+
+        if image is not None:
+
+            gray = cv2.cvtColor(
+                image,
+                cv2.COLOR_RGB2GRAY
+            )
+
+            col1, col2 = st.columns(2)
+
+            with col1:
+
+                st.subheader("Original")
+
+                st.image(
+                    image,
+                    use_container_width=True
+                )
+
+            with col2:
+
+                st.subheader("Grayscale")
+
+                st.image(
+                    gray,
+                    clamp=True,
+                    use_container_width=True
+                )
+
+
+# =========================================================
+# TRAINING
+# =========================================================
+elif page == "Training (CNN)":
+
+    st.title("🧠 Training CNN")
+
+    st.warning(
+        "Training membutuhkan jumlah gambar yang memadai. "
+        "Dataset dengan hanya beberapa gambar tidak dapat menghasilkan "
+        "model klasifikasi yang valid."
+    )
+
+    st.write(
+        f"Jumlah gambar saat ini: **{total_images}**"
+    )
+
+    st.write(
+        "Distribusi dataset:"
+    )
+
+    st.dataframe(
+        summary.rename("Jumlah Gambar"),
+        use_container_width=True
+    )
+
+    st.info(
+        "Modul training CNN akan digunakan setelah dataset "
+        "memiliki jumlah data yang cukup."
+    )
+
+
+# =========================================================
+# EVALUATION
+# =========================================================
+elif page == "Evaluation":
+
+    st.title("📊 Evaluation")
+
+    st.warning(
+        "Evaluasi model belum dapat dilakukan secara valid "
+        "jika dataset hanya berisi sedikit gambar."
+    )
+
+    st.write("Distribusi dataset saat ini:")
+
+    st.bar_chart(summary)
+
+    st.info(
+        "Tambahkan dataset yang cukup untuk setiap kelas MEL, NV, dan BKL "
+        "sebelum melakukan train-test split dan evaluasi model."
+    )
