@@ -1,5 +1,55 @@
 import numpy as np
-from sklearn.metrics import accuracy_score,confusion_matrix,classification_report
-def evaluate_model(model,X,y,class_names):
-    pred=np.argmax(model.predict(X,verbose=0),axis=1)
-    return {"accuracy":float(accuracy_score(y,pred)),"report":classification_report(y,pred,labels=list(range(len(class_names))),target_names=class_names,output_dict=True,zero_division=0),"confusion_matrix":confusion_matrix(y,pred,labels=list(range(len(class_names))))}
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    accuracy_score
+)
+
+
+def evaluate_model(model, X_test, y_test, class_names):
+
+    predictions = model.predict(
+        X_test,
+        verbose=0
+    )
+
+    y_pred = np.argmax(
+        predictions,
+        axis=1
+    )
+
+    accuracy = accuracy_score(
+        y_test,
+        y_pred
+    )
+
+    cm = confusion_matrix(
+        y_test,
+        y_pred,
+        labels=list(range(len(class_names)))
+    )
+
+    report = classification_report(
+        y_test,
+        y_pred,
+        labels=list(range(len(class_names))),
+        target_names=class_names,
+        output_dict=True,
+        zero_division=0
+    )
+
+    report_text = classification_report(
+        y_test,
+        y_pred,
+        labels=list(range(len(class_names))),
+        target_names=class_names,
+        zero_division=0
+    )
+
+    return {
+        "accuracy": accuracy,
+        "confusion_matrix": cm,
+        "report": report,
+        "report_text": report_text,
+        "predictions": y_pred
+    }
