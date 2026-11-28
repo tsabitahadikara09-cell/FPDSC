@@ -1,242 +1,180 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
-import cv2
-import os
-import time
-from pathlib import Path
+import matplotlib.pyplot as plt
+
 from PIL import Image
 
+from modules.dataset import (
+    load_dataset_index,
+    class_summary,
+    get_class_images,
+    get_image_by_id,
+    get_image_options
+)
+
+from modules.preprocessing import (
+    mean_filter,
+    median_filter,
+    gaussian_filter,
+    otsu_mask,
+    apply_segmentation,
+    enhance_image,
+    hair_removal,
+    grayscale_image
+)
+
+from modules.training import train_model
+from modules.evaluation import evaluate_model
+
+
 # =========================================================
-# CONFIGURATION
+# PAGE CONFIG
 # =========================================================
+
 st.set_page_config(
     page_title="DermaCNN",
     page_icon="🧬",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
 
-ROOT_DIR = Path(__file__).resolve().parent
-DATASET_DIR = ROOT_DIR / "dataset"
-
-CLASSES = ["MEL", "NV", "BKL"]
-
-CLASS_INFO = {
-    "MEL": "Melanoma",
-    "NV": "Melanocytic Nevi",
-    "BKL": "Benign Keratosis-like Lesions"
-}
-
-CLASS_COLORS = {
-    "MEL": "#E74C3C",
-    "NV": "#3498DB",
-    "BKL": "#2ECC71"
-}
 
 # =========================================================
-# STYLE
+# DATASET
 # =========================================================
-st.markdown("""
-<style>
-.stApp {
-    background-color: #0e0e17;
-    color: #f5f5f5;
-}
 
-[data-testid="stSidebar"] {
-    background-color: #191522;
-}
-
-h1, h2, h3 {
-    color: #f5f5f5 !important;
-}
-
-div[data-testid="stMetric"] {
-    background-color: #1c1c28;
-    padding: 18px;
-    border-radius: 12px;
-    border: 1px solid #343442;
-}
-
-div[data-testid="stAlert"] {
-    border-radius: 10px;
-}
-
-</style>
-""", unsafe_allow_html=True)
-
-# =========================================================
-# DATASET LOADER
-# =========================================================
 @st.cache_data
-def load_dataset():
+def get_dataset():
 
-    rows = []
+    df, error = load_dataset_index()
 
-    if not DATASET_DIR.exists():
-        return pd.DataFrame(
-            columns=["image_id", "label", "path"]
-        )
-
-    for file in DATASET_DIR.iterdir():
-
-        if not file.is_file():
-            continue
-
-        if file.suffix.lower() not in [
-            ".jpg", ".jpeg", ".png", ".bmp"
-        ]:
-            continue
-
-        filename = file.stem.upper()
-
-        # Label diambil dari prefix nama file
-        label = filename.split("_")[0]
-
-        if label not in CLASSES:
-            continue
-
-        try:
-            with Image.open(file) as img:
-                img.verify()
-
-            rows.append({
-                "image_id": file.stem,
-                "label": label,
-                "path": str(file)
-            })
-
-        except Exception:
-            continue
-
-    df = pd.DataFrame(
-        rows,
-        columns=["image_id", "label", "path"]
-    )
-
-    return df
+    return df, error
 
 
-# =========================================================
-# DATASET UTILITIES
-# =========================================================
-def get_class_summary(df):
+df, dataset_error = get_dataset()
 
-    if df.empty:
-        return pd.Series(
-            {class_name: 0 for class_name in CLASSES}
-        )
-
-    return df["label"].value_counts().reindex(
-        CLASSES,
-        fill_value=0
-    )
-
-
-def get_sample_image(df, label):
-
-    subset = df[df["label"] == label]
-
-    if subset.empty:
-        return None
-
-    row = subset.iloc[0]
-
-    try:
-        return Image.open(row["path"]).convert("RGB")
-    except Exception:
-        return None
-
-
-def read_image(path):
-
-    try:
-        image = Image.open(path).convert("RGB")
-        return np.array(image)
-    except Exception:
-        return None
-
-
-def get_random_image(df, label):
-
-    subset = df[df["label"] == label]
-
-    if subset.empty:
-        return None
-
-    row = subset.sample(1).iloc[0]
-
-    return row
-
-
-# =========================================================
-# INITIAL DATA
-# =========================================================
-df = load_dataset()
-
-summary = get_class_summary(df)
-
-total_images = len(df)
-detected_classes = sum(summary > 0)
 
 # =========================================================
 # SIDEBAR
 # =========================================================
-with st.sidebar:
 
-    st.markdown("## 🧬 DermaCNN")
+st.sidebar.title("🧬 DermaCNN")
+st.sidebar.caption("Skin Lesion Classification | ISIC 2018")
 
-    st.caption("Skin Lesion Classification | ISIC 2018")
+page = st.sidebar.radio(
+    "Navigasi",
+    [
+        "Home",
+        "Dataset",
+        "Filtering",
+        "Segmentation & Masking",
+        "Enhancement",
+        "Hair Removal",
+        "Grayscale",
+        "Training (CNN)",
+        "Evaluation"
+    ]
+)
 
-    st.markdown("---")
+st.sidebar.divider()
 
-    page = st.radio(
-        "Navigasi",
-        [
-            "Home",
-            "Dataset",
-            "Filtering",
-            "Segmentation & Masking",
-            "Enhancement",
-            "Hair Removal",
-            "Grayscale",
-            "Training (CNN)",
-            "Evaluation"
-        ]
+if df is not None and not df.empty:
+
+    st.sidebar.success(
+        f"Dataset terbaca: {len(df)} gambar"
     )
 
-    st.markdown("---")
+    summary = class_summary(df)
 
-    st.markdown("### Dataset Status")
-
-    if total_images > 0:
-
-        st.success(f"Dataset terbaca: {total_images} gambar")
-
-    else:
-
-        st.error("Dataset belum ditemukan")
-
-    st.caption(
-        f"Kelas terdeteksi: {detected_classes} / {len(CLASSES)}"
+    detected = sum(
+        1 for value in summary.values()
+        if value > 0
     )
 
-    if st.button("🔄 Refresh Dataset", use_container_width=True):
+    st.sidebar.caption(
+        f"Kelas terdeteksi: {detected}/3"
+    )
 
-        st.cache_data.clear()
-        st.rerun()
+else:
 
-    st.markdown("---")
+    st.sidebar.warning("Dataset belum terbaca.")
 
-    st.caption("DermaCNN | Biomedical Deep Learning Project")
-    st.caption("ISIC 2018 • MEL • NV • BKL")
+if st.sidebar.button("🔄 Refresh Dataset"):
+
+    st.cache_data.clear()
+    st.rerun()
+
+st.sidebar.divider()
+
+st.sidebar.caption(
+    "DermaCNN | Biomedical Deep Learning Project"
+)
+
+st.sidebar.caption(
+    "ISIC 2018 • MEL • NV • BKL"
+)
+
+
+# =========================================================
+# HELPER
+# =========================================================
+
+def choose_image(label):
+
+    subset = get_class_images(df, label)
+
+    if subset.empty:
+        st.warning(f"Tidak ada gambar pada kelas {label}.")
+        return None, None
+
+    options = get_image_options(df, label)
+
+    selected = st.selectbox(
+        "Pilih gambar",
+        options,
+        key=f"image_{label}_{page}"
+    )
+
+    image, actual_label = get_image_by_id(
+        df,
+        selected
+    )
+
+    return image, selected
+
+
+def show_image(image, title):
+
+    st.subheader(title)
+
+    st.image(
+        image,
+        use_container_width=True
+    )
+
+
+def plot_distribution(summary):
+
+    fig, ax = plt.subplots(figsize=(8, 4))
+
+    labels = list(summary.keys())
+    values = list(summary.values())
+
+    ax.bar(labels, values)
+
+    ax.set_title("Distribusi Dataset")
+    ax.set_xlabel("Kelas")
+    ax.set_ylabel("Jumlah Gambar")
+
+    st.pyplot(fig)
+
+    plt.close(fig)
 
 
 # =========================================================
 # HOME
 # =========================================================
+
 if page == "Home":
 
     st.title("🧬 DermaCNN")
@@ -245,612 +183,458 @@ if page == "Home":
         """
         ### Skin Lesion Classification
 
-        Aplikasi untuk eksplorasi dataset dan preprocessing citra
-        lesi kulit menggunakan pendekatan computer vision dan
-        deep learning.
+        Aplikasi preprocessing dan klasifikasi citra dermoskopi
+        berbasis Deep Learning.
+
+        Dataset terdiri dari tiga kelas:
+
+        - **MEL** — Melanoma
+        - **NV** — Melanocytic Nevi
+        - **BKL** — Benign Keratosis
+
         """
     )
 
-    col1, col2, col3 = st.columns(3)
+    if df is not None and not df.empty:
 
-    col1.metric("Total Gambar", total_images)
+        summary = class_summary(df)
 
-    col2.metric("Jumlah Kelas", detected_classes)
+        col1, col2, col3 = st.columns(3)
 
-    col3.metric("Kelas", "MEL • NV • BKL")
+        col1.metric(
+            "Total Gambar",
+            len(df)
+        )
 
-    st.markdown("---")
+        col2.metric(
+            "Jumlah Kelas",
+            len([x for x in summary.values() if x > 0])
+        )
 
-    st.subheader("Distribusi Dataset")
+        col3.metric(
+            "Kategori",
+            "MEL • NV • BKL"
+        )
 
-    if total_images > 0:
+        st.subheader("Distribusi Dataset")
 
-        st.bar_chart(summary)
+        plot_distribution(summary)
 
     else:
 
-        st.warning(
-            "Belum terdapat gambar yang berhasil dibaca dari folder dataset."
-        )
-
-    st.subheader("Contoh Gambar per Kelas")
-
-    columns = st.columns(3)
-
-    for i, label in enumerate(CLASSES):
-
-        with columns[i]:
-
-            st.markdown(f"### {label}")
-
-            st.caption(CLASS_INFO[label])
-
-            image = get_sample_image(df, label)
-
-            if image is not None:
-
-                st.image(
-                    image,
-                    use_container_width=True
-                )
-
-            else:
-
-                st.info(f"Belum ada gambar kelas {label}")
+        st.error(dataset_error)
 
 
 # =========================================================
-# DATASET EXPLORER
+# DATASET
 # =========================================================
+
 elif page == "Dataset":
 
     st.title("📁 Dataset Explorer")
 
-    st.caption("Dataset ISIC • MEL, NV, BKL")
+    if df.empty:
 
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric("Total Gambar", total_images)
-
-    col2.metric("Jumlah Kelas", detected_classes)
-
-    col3.metric(
-        "Kelas",
-        "MEL • NV • BKL"
-    )
-
-    st.markdown("---")
-
-    st.subheader("Distribusi Dataset")
-
-    if total_images > 0:
-
-        chart_df = summary.rename("Jumlah Gambar")
-
-        st.bar_chart(chart_df)
-
-        st.dataframe(
-            pd.DataFrame({
-                "Kelas": CLASSES,
-                "Nama Penyakit": [
-                    CLASS_INFO[c] for c in CLASSES
-                ],
-                "Jumlah Gambar": [
-                    int(summary[c]) for c in CLASSES
-                ]
-            }),
-            use_container_width=True,
-            hide_index=True
-        )
+        st.warning(dataset_error)
 
     else:
 
-        st.warning(
-            "Dataset kosong. Pastikan gambar berada langsung di folder dataset/"
+        summary = class_summary(df)
+
+        col1, col2, col3 = st.columns(3)
+
+        col1.metric("Total Gambar", len(df))
+
+        col2.metric(
+            "Jumlah Kelas",
+            sum(value > 0 for value in summary.values())
         )
 
-    st.markdown("---")
-
-    st.subheader("Contoh Gambar per Kelas")
-
-    cols = st.columns(3)
-
-    for i, label in enumerate(CLASSES):
-
-        with cols[i]:
-
-            st.markdown(f"### {label}")
-
-            image = get_sample_image(df, label)
-
-            if image is not None:
-
-                st.image(
-                    image,
-                    caption=CLASS_INFO[label],
-                    use_container_width=True
-                )
-
-            else:
-
-                st.info(f"Gambar kelas {label} belum tersedia")
-
-    st.markdown("---")
-
-    st.subheader("Indeks Dataset")
-
-    if total_images > 0:
-
-        display_df = df[["image_id", "label"]].copy()
-
-        display_df["Nama Kelas"] = display_df["label"].map(
-            CLASS_INFO
+        col3.metric(
+            "Kelas",
+            "MEL • NV • BKL"
         )
 
-        st.dataframe(
-            display_df,
-            use_container_width=True,
-            hide_index=True
-        )
+        st.subheader("Distribusi Dataset")
+
+        plot_distribution(summary)
+
+        st.subheader("Contoh Gambar per Kelas")
+
+        cols = st.columns(3)
+
+        for i, label in enumerate(["MEL", "NV", "BKL"]):
+
+            with cols[i]:
+
+                st.markdown(f"**{label}**")
+
+                image, image_id = sample_image(
+                    df, label
+                ) if False else (None, None)
+
+                subset = get_class_images(df, label)
+
+                if not subset.empty:
+
+                    first = subset.iloc[0]
+
+                    try:
+
+                        img = Image.open(
+                            first["path"]
+                        ).convert("RGB")
+
+                        st.image(
+                            img,
+                            use_container_width=True
+                        )
+
+                        st.caption(first["image_id"])
+
+                    except Exception:
+
+                        st.warning("Gambar gagal dibaca.")
+
+                else:
+
+                    st.info("Belum ada gambar.")
 
 
 # =========================================================
 # FILTERING
 # =========================================================
+
 elif page == "Filtering":
 
-    st.title("🧹 Filtering")
+    st.title("🔧 Image Filtering")
 
     st.write(
-        "Mengurangi noise pada citra lesi kulit menggunakan Gaussian Blur."
+        "Filtering digunakan untuk mengurangi noise "
+        "pada citra dermoskopi."
     )
 
     label = st.selectbox(
         "Pilih kelas",
-        CLASSES
+        ["MEL", "NV", "BKL"]
     )
 
-    subset = df[df["label"] == label]
+    image, image_id = choose_image(label)
 
-    if subset.empty:
+    if image is not None:
 
-        st.warning(f"Tidak ada gambar pada kelas {label}.")
-
-    else:
-
-        selected = st.selectbox(
-            "Pilih gambar",
-            subset["image_id"].tolist()
+        method = st.selectbox(
+            "Metode filtering",
+            [
+                "Mean Filter",
+                "Median Filter",
+                "Gaussian Filter"
+            ]
         )
 
-        row = subset[
-            subset["image_id"] == selected
-        ].iloc[0]
+        kernel_size = st.slider(
+            "Kernel size",
+            min_value=3,
+            max_value=15,
+            step=2,
+            value=5
+        )
 
-        image = read_image(row["path"])
+        if method == "Mean Filter":
 
-        if image is not None:
-
-            filtered = cv2.GaussianBlur(
+            processed = mean_filter(
                 image,
-                (5, 5),
-                0
+                kernel_size
             )
 
-            col1, col2 = st.columns(2)
+        elif method == "Median Filter":
 
-            with col1:
+            processed = median_filter(
+                image,
+                kernel_size
+            )
 
-                st.subheader("Original")
+        else:
 
-                st.image(
-                    image,
-                    use_container_width=True
-                )
+            processed = gaussian_filter(
+                image,
+                kernel_size
+            )
 
-            with col2:
+        col1, col2 = st.columns(2)
 
-                st.subheader("Filtered")
+        with col1:
+            show_image(image, "Original")
 
-                st.image(
-                    filtered,
-                    use_container_width=True
-                )
+        with col2:
+            show_image(processed, method)
 
 
 # =========================================================
 # SEGMENTATION & MASKING
 # =========================================================
+
 elif page == "Segmentation & Masking":
 
     st.title("🔬 Segmentation & Masking")
 
     st.write(
-        "Membuat mask lesi dengan threshold adaptif dan operasi morfologi."
+        "Mask lesi dibuat menggunakan Otsu Thresholding "
+        "dan operasi morfologi untuk membersihkan noise."
     )
 
     label = st.selectbox(
         "Pilih kelas",
-        CLASSES
+        ["MEL", "NV", "BKL"]
     )
 
-    subset = df[df["label"] == label]
+    image, image_id = choose_image(label)
 
-    if subset.empty:
+    if image is not None:
 
-        st.warning(f"Tidak ada gambar pada kelas {label}.")
+        mask = otsu_mask(image)
 
-    else:
-
-        selected = st.selectbox(
-            "Pilih gambar",
-            subset["image_id"].tolist()
+        segmented = apply_segmentation(
+            image,
+            mask
         )
 
-        row = subset[
-            subset["image_id"] == selected
-        ].iloc[0]
+        col1, col2, col3 = st.columns(3)
 
-        image = read_image(row["path"])
+        with col1:
+            show_image(image, "Original")
 
-        if image is not None:
+        with col2:
+            show_image(mask, "Mask (Otsu)")
 
-            gray = cv2.cvtColor(
-                image,
-                cv2.COLOR_RGB2GRAY
-            )
-
-            blur = cv2.GaussianBlur(
-                gray,
-                (5, 5),
-                0
-            )
-
-            mask = cv2.adaptiveThreshold(
-                blur,
-                255,
-                cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY_INV,
-                51,
-                5
-            )
-
-            kernel = np.ones(
-                (5, 5),
-                np.uint8
-            )
-
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_CLOSE,
-                kernel
-            )
-
-            mask = cv2.morphologyEx(
-                mask,
-                cv2.MORPH_OPEN,
-                kernel
-            )
-
-            segmented = cv2.bitwise_and(
-                image,
-                image,
-                mask=mask
-            )
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-
-                st.subheader("Original")
-
-                st.image(
-                    image,
-                    use_container_width=True
-                )
-
-            with col2:
-
-                st.subheader("Mask")
-
-                st.image(
-                    mask,
-                    clamp=True,
-                )
-
-            with col3:
-
-                st.subheader("Segmented")
-
-                st.image(
-                    segmented,
-                    use_container_width=True
-                )
+        with col3:
+            show_image(segmented, "Segmented")
 
 
 # =========================================================
 # ENHANCEMENT
 # =========================================================
+
 elif page == "Enhancement":
 
     st.title("✨ Image Enhancement")
 
     st.write(
-        "Meningkatkan kontras citra menggunakan CLAHE."
+        "Enhancement meningkatkan kontras lokal "
+        untuk membantu visualisasi lesi."
     )
 
     label = st.selectbox(
         "Pilih kelas",
-        CLASSES
+        ["MEL", "NV", "BKL"]
     )
 
-    subset = df[df["label"] == label]
+    image, image_id = choose_image(label)
 
-    if subset.empty:
+    if image is not None:
 
-        st.warning(f"Tidak ada gambar pada kelas {label}.")
-
-    else:
-
-        selected = st.selectbox(
-            "Pilih gambar",
-            subset["image_id"].tolist()
+        clip_limit = st.slider(
+            "CLAHE Clip Limit",
+            1.0,
+            5.0,
+            2.0
         )
 
-        row = subset[
-            subset["image_id"] == selected
-        ].iloc[0]
+        processed = enhance_image(
+            image,
+            clip_limit=clip_limit
+        )
 
-        image = read_image(row["path"])
+        col1, col2 = st.columns(2)
 
-        if image is not None:
+        with col1:
+            show_image(image, "Original")
 
-            lab = cv2.cvtColor(
-                image,
-                cv2.COLOR_RGB2LAB
-            )
-
-            l, a, b = cv2.split(lab)
-
-            clahe = cv2.createCLAHE(
-                clipLimit=2.0,
-                tileGridSize=(8, 8)
-            )
-
-            enhanced_l = clahe.apply(l)
-
-            enhanced_lab = cv2.merge(
-                (enhanced_l, a, b)
-            )
-
-            enhanced = cv2.cvtColor(
-                enhanced_lab,
-                cv2.COLOR_LAB2RGB
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.subheader("Original")
-
-                st.image(
-                    image,
-                    use_container_width=True
-                )
-
-            with col2:
-
-                st.subheader("Enhanced")
-
-                st.image(
-                    enhanced,
-                    use_container_width=True
-                )
+        with col2:
+            show_image(processed, "Enhanced")
 
 
 # =========================================================
 # HAIR REMOVAL
 # =========================================================
+
 elif page == "Hair Removal":
 
-    st.title("🪒 Hair Removal")
+    st.title("🧹 Hair Removal")
 
     st.write(
-        "Menghilangkan rambut pada citra menggunakan Black-Hat "
-        "morphology dan inpainting."
+        "Mengurangi rambut pada citra dermoskopi "
+        menggunakan Black-hat Morphology dan Inpainting."
     )
 
     label = st.selectbox(
         "Pilih kelas",
-        CLASSES
+        ["MEL", "NV", "BKL"]
     )
 
-    subset = df[df["label"] == label]
+    image, image_id = choose_image(label)
 
-    if subset.empty:
+    if image is not None:
 
-        st.warning(f"Tidak ada gambar pada kelas {label}.")
+        processed = hair_removal(image)
 
-    else:
+        col1, col2 = st.columns(2)
 
-        selected = st.selectbox(
-            "Pilih gambar",
-            subset["image_id"].tolist()
-        )
+        with col1:
+            show_image(image, "Original")
 
-        row = subset[
-            subset["image_id"] == selected
-        ].iloc[0]
-
-        image = read_image(row["path"])
-
-        if image is not None:
-
-            gray = cv2.cvtColor(
-                image,
-                cv2.COLOR_RGB2GRAY
-            )
-
-            kernel = cv2.getStructuringElement(
-                cv2.MORPH_RECT,
-                (17, 17)
-            )
-
-            blackhat = cv2.morphologyEx(
-                gray,
-                cv2.MORPH_BLACKHAT,
-                kernel
-            )
-
-            _, hair_mask = cv2.threshold(
-                blackhat,
-                10,
-                255,
-                cv2.THRESH_BINARY
-            )
-
-            cleaned = cv2.inpaint(
-                image,
-                hair_mask,
-                3,
-                cv2.INPAINT_TELEA
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.subheader("Original")
-
-                st.image(
-                    image,
-                    use_container_width=True
-                )
-
-            with col2:
-
-                st.subheader("Hair Removed")
-
-                st.image(
-                    cleaned,
-                    use_container_width=True
-                )
+        with col2:
+            show_image(processed, "Hair Removed")
 
 
 # =========================================================
 # GRAYSCALE
 # =========================================================
+
 elif page == "Grayscale":
 
     st.title("⚫ Grayscale")
 
-    st.write(
-        "Mengubah citra RGB menjadi grayscale."
-    )
-
     label = st.selectbox(
         "Pilih kelas",
-        CLASSES
+        ["MEL", "NV", "BKL"]
     )
 
-    subset = df[df["label"] == label]
+    image, image_id = choose_image(label)
 
-    if subset.empty:
+    if image is not None:
 
-        st.warning(f"Tidak ada gambar pada kelas {label}.")
+        processed = grayscale_image(image)
 
-    else:
+        col1, col2 = st.columns(2)
 
-        selected = st.selectbox(
-            "Pilih gambar",
-            subset["image_id"].tolist()
-        )
+        with col1:
+            show_image(image, "Original")
 
-        row = subset[
-            subset["image_id"] == selected
-        ].iloc[0]
-
-        image = read_image(row["path"])
-
-        if image is not None:
-
-            gray = cv2.cvtColor(
-                image,
-                cv2.COLOR_RGB2GRAY
-            )
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-
-                st.subheader("Original")
-
-                st.image(
-                    image,
-                    use_container_width=True
-                )
-
-            with col2:
-
-                st.subheader("Grayscale")
-
-                st.image(
-                    gray,
-                    clamp=True,
-                    use_container_width=True
-                )
+        with col2:
+            show_image(processed, "Grayscale")
 
 
 # =========================================================
 # TRAINING
 # =========================================================
+
 elif page == "Training (CNN)":
 
     st.title("🧠 Training CNN")
 
-    st.warning(
-        "Training membutuhkan jumlah gambar yang memadai. "
-        "Dataset dengan hanya beberapa gambar tidak dapat menghasilkan "
-        "model klasifikasi yang valid."
-    )
-
     st.write(
-        f"Jumlah gambar saat ini: **{total_images}**"
+        "Model CNN digunakan untuk klasifikasi "
+        "citra lesi kulit ke dalam tiga kategori."
     )
 
-    st.write(
-        "Distribusi dataset:"
-    )
+    if df.empty:
 
-    st.dataframe(
-        summary.rename("Jumlah Gambar"),
-        use_container_width=True
-    )
+        st.warning("Dataset kosong.")
 
-    st.info(
-        "Modul training CNN akan digunakan setelah dataset "
-        "memiliki jumlah data yang cukup."
-    )
+    else:
+
+        summary = class_summary(df)
+
+        st.subheader("Distribusi Dataset")
+
+        st.dataframe(
+            pd.DataFrame({
+                "Label": list(summary.keys()),
+                "Jumlah Gambar": list(summary.values())
+            }),
+            use_container_width=True
+        )
+
+        st.warning(
+            "Training memerlukan jumlah gambar yang memadai "
+            "pada setiap kelas. Dataset yang terlalu sedikit "
+            "tidak dapat menghasilkan evaluasi yang valid."
+        )
+
+        epochs = st.slider(
+            "Epoch",
+            min_value=1,
+            max_value=50,
+            value=10
+        )
+
+        if st.button("🚀 Mulai Training"):
+
+            try:
+
+                with st.spinner("Training CNN berlangsung..."):
+
+                    model, history, encoder = train_model(
+                        df,
+                        epochs=epochs
+                    )
+
+                st.session_state["model"] = model
+                st.session_state["history"] = history
+                st.session_state["encoder"] = encoder
+
+                st.success("Training selesai.")
+
+                history_df = pd.DataFrame(
+                    history.history
+                )
+
+                st.line_chart(
+                    history_df[["accuracy", "val_accuracy"]]
+                )
+
+                st.line_chart(
+                    history_df[["loss", "val_loss"]]
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Training gagal: {e}"
+                )
 
 
 # =========================================================
 # EVALUATION
 # =========================================================
+
 elif page == "Evaluation":
 
     st.title("📊 Evaluation")
 
-    st.warning(
-        "Evaluasi model belum dapat dilakukan secara valid "
-        "jika dataset hanya berisi sedikit gambar."
-    )
+    summary = class_summary(df)
 
-    st.write("Distribusi dataset saat ini:")
+    if df.empty:
 
-    st.bar_chart(summary)
+        st.warning("Dataset kosong.")
 
-    st.info(
-        "Tambahkan dataset yang cukup untuk setiap kelas MEL, NV, dan BKL "
-        "sebelum melakukan train-test split dan evaluasi model."
-    )
+    else:
+
+        st.subheader("Distribusi Dataset")
+
+        plot_distribution(summary)
+
+        st.warning(
+            "Evaluasi model membutuhkan dataset yang cukup "
+            "dan data test terpisah dari data training. "
+            "Dengan hanya beberapa gambar, hasil evaluasi "
+            "tidak merepresentasikan performa model sebenarnya."
+        )
+
+        if "model" not in st.session_state:
+
+            st.info(
+                "Silakan lakukan training terlebih dahulu."
+            )
+
+        else:
+
+            st.success(
+                "Model training tersedia pada session ini."
+            )
+
+            st.info(
+                "Gunakan data test terpisah untuk evaluasi "
+                "yang valid."
+            )
